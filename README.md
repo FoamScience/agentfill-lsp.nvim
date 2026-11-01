@@ -15,8 +15,8 @@ An in-process language server answers `textDocument/inlineCompletion` for Neovim
 
 ## Features
 
-- **Manual trigger:** press `<M-c>` in insert mode. Accept and cycle with whatever you map to
-  `vim.lsp.inline_completion.get()` / `.select()`.
+- **Manual trigger:** press `<M-c>` in insert mode. Accept and cycle keys are optional (see
+  [Keys](#keys)).
 - **Region rewrites:** the model rewrites a small region around the cursor, so a suggestion can
   also change the lines after the cursor. Neovim shows the new text as ghost text, the lines it
   replaces are highlighted with `hl_delete`, and accepting applies it as one range.
@@ -24,6 +24,9 @@ An in-process language server answers `textDocument/inlineCompletion` for Neovim
   - the surrounding lines and the file header
   - LSP definitions of identifiers near the cursor (or imported files' outlines when no LSP answers)
   - [m2v.nvim](https://github.com/FoamScience/m2v.nvim) semantic search hits, when that plugin is installed
+- **Runtime control:** switch agents, restart the session or pause suggestions without
+  restarting Neovim (see [Commands](#commands)).
+- **Filtering:** attach by filetype allow and deny lists, skipping files over `max_file_bytes`.
 - **Metrics:** `:AFStats` reports outcomes, latency, tokens and cost.
 - **No tools:** see [Safety](#safety).
 
@@ -43,6 +46,8 @@ Any other [Agent Client Protocol](https://agentclientprotocol.com) agent can be 
 
 - Neovim with `vim.lsp.inline_completion` (0.12+)
 - the CLI of the agent you use (`claude` or `opencode`) on `$PATH`
+- optional: [m2v.nvim](https://github.com/FoamScience/m2v.nvim), which adds semantic search hits
+  to each request's context
 
 ### lazy.nvim
 
@@ -50,27 +55,15 @@ Any other [Agent Client Protocol](https://agentclientprotocol.com) agent can be 
 {
     "FoamScience/agentfill-lsp.nvim",
     main = "agentfill",
+    -- optional: semantic search context
+    dependencies = { "FoamScience/m2v.nvim" },
     -- start its client before other LSP servers so its suggestion sorts first
     lazy = false,
     opts = {},
 }
 ```
 
-### Enable inline completion
-
-Inline completion must be enabled for buffers where the `agentfill` client attaches, for example:
-
-```lua
-vim.api.nvim_create_autocmd("LspAttach", {
-    callback = function(ev)
-        local client = vim.lsp.get_client_by_id(ev.data.client_id)
-        if client and client:supports_method("textDocument/inlineCompletion", ev.buf) then
-            vim.lsp.inline_completion.enable(true, { bufnr = ev.buf })
-        end
-    end,
-})
-vim.keymap.set("i", "<C-f>", function() return vim.lsp.inline_completion.get() end)
-```
+Run `:checkhealth agentfill` to check the setup.
 
 ## Configuration
 
@@ -83,7 +76,10 @@ opts = {
         -- myagent = { backend = "acp", cmd = { "my-agent", "--acp" }, mode = "...", env = { ... } },
     },
     max_turns = 8, -- restart the session after this many completions
-    keys = { trigger = "<M-c>" },
+    keys = { trigger = "<M-c>", accept = "<Tab>", next = "<M-]>", prev = "<M-[>" },
+    enable_inline = true, -- enable vim.lsp.inline_completion where the client attaches
+    filetypes = nil, -- attach only to these filetypes; nil attaches to all
+    exclude_filetypes = { "gitcommit" },
     hl_delete = "DiffDelete", -- lines a suggestion replaces, shown next to the ghost text; false disables
 }
 ```
@@ -91,6 +87,28 @@ opts = {
 > [!TIP]
 > Context sources can be turned off one by one with `defs = false`, `imports = false` and
 > `search = false`.
+
+The client attaches to named, normal buffers that pass the filetype filters and are no larger
+than `max_file_bytes` (512 KiB by default). The trigger does nothing in other buffers.
+
+### Keys
+
+All keys are insert-mode mappings. Set a key to `false` to skip its mapping.
+
+| Key | Default | Action |
+|---|---|---|
+| `trigger` | `<M-c>` | Request a suggestion; `<Plug>(agentfill-trigger)` is always mapped too |
+| `accept` | `false` | `vim.lsp.inline_completion.get()`; types the key itself when no suggestion is shown |
+| `next` / `prev` | `false` | `vim.lsp.inline_completion.select()` forward / backward |
+
+### Commands
+
+| Command | Action |
+|---|---|
+| `:AFAgent [name]` | Show the agent, or switch to `name` and start a new session |
+| `:AFRestart` | Start a new agent session |
+| `:AFToggle` | Turn suggestions off or on |
+| `:AFStats` | Show request metrics (see [Metrics](#metrics)) |
 
 ### ACP agent fields
 
@@ -109,7 +127,7 @@ last 10 requests:
 
 | Metric | Details |
 |---|---|
-| Outcomes | shown, accepted (the first insert-mode edit after a suggestion matches it), no suggestion, discarded (buffer or cursor moved), superseded, error |
+| Outcomes | shown, accepted (the first insert-mode edit after a suggestion matches it), no suggestion, discarded (buffer or cursor moved), superseded (by a newer request or a session restart), error |
 | Latency p50/p90 | context gathering, agent turn, total |
 | Tokens per turn | input, cached, output, and cost, as reported by the agent |
 | Prompt size | characters, split by part (excerpt, header, definitions, import outlines, search hits) with counts |
