@@ -53,8 +53,13 @@ M.config = {
         max_query = 500,
         timeout_ms = 400,
     },
-    -- accepting and cycling are the vim.lsp.inline_completion keys
-    keys = { trigger = "<M-c>" },
+    -- insert-mode keys; false skips a mapping. accept falls back to its own key when nothing is shown
+    keys = { trigger = "<M-c>", accept = false, next = false, prev = false },
+    -- enable vim.lsp.inline_completion in buffers the client attaches to
+    enable_inline = true,
+    -- filetypes to attach to (nil: all) and to never attach to
+    filetypes = nil,
+    exclude_filetypes = {},
     -- log the reply, the item and what nvim drew for it with each request
     debug = false,
     -- marks the lines a suggestion replaces next to nvim's ghost text; false disables
@@ -65,6 +70,9 @@ local INSTRUCTIONS =
     [[You are a code completion and editing engine inside an editor. The user message ends with an excerpt of a file in which the editable part sits between a <REGION> line and a </REGION> line. The region contains <CURSOR>, where the user is typing: write the code that belongs at <CURSOR> (continue the statement, finish the block, implement what a nearby comment describes) and adjust later lines of the region when they must change to stay consistent. Everything outside the region is read-only and stays in the file: code after </REGION> directly follows your rewrite, so never repeat it; <context> and <outline> blocks show related code from this and other files. Match the indentation and style of the surrounding code and keep lines that need no change exactly as they are, blank lines included. Never call tools or functions, and never explain, ask, or refuse. Reply with exactly <region>, a newline, the full rewritten region without <CURSOR>, a newline, </region>, and nothing else. Return the region unchanged when nothing needs doing.]]
 
 local session, inflight, pending
+local client_id
+-- :AFToggle; off: no triggers, no suggestions served
+local enabled = true
 -- last finished suggestion; served while buffer and cursor are unchanged
 local ready
 -- suggestion on screen, waiting to learn whether it gets accepted
@@ -248,7 +256,9 @@ local function on_result(s, req, err, text, usage)
     s.usage = usage or s.usage
     req.turn_ms, req.usage, req.session_turn = ms_since(req.sent), usage, s.turns
     req.reply = text
-    if err then
+    if err and s.closed then
+        finish(req, "superseded", "session restarted")
+    elseif err then
         vim.notify("agentfill: " .. tostring(err), vim.log.levels.WARN)
         finish(req, "error", "error")
     elseif not fresh(req) then
@@ -381,6 +391,9 @@ end
 
 function M.trigger()
     local buf = api.nvim_get_current_buf()
+    if not enabled or not (client_id and vim.lsp.buf_is_attached(buf, client_id)) then
+        return
+    end
     local row, col = unpack(api.nvim_win_get_cursor(0))
     local first = math.max(0, row - 1 - M.config.region.before)
     local last = math.min(api.nvim_buf_line_count(buf), row + M.config.region.after)
@@ -448,7 +461,8 @@ end
 function M.complete(params)
     local req = ready
     if
-        not req
+        not enabled
+        or not req
         or vim.uri_to_bufnr(params.textDocument.uri) ~= req.buf
         or params.position.line ~= req.row
         or params.position.character ~= req.col
@@ -460,25 +474,111 @@ function M.complete(params)
     return { items = { req.item } }
 end
 
-local client_id
-
 local function attach(buf)
-    if vim.bo[buf].buftype == "" and api.nvim_buf_get_name(buf) ~= "" then
-        vim.lsp.buf_attach_client(buf, client_id)
+    local cfg, name, ft = M.config, api.nvim_buf_get_name(buf), vim.bo[buf].filetype
+    if
+        vim.bo[buf].buftype ~= ""
+        or name == ""
+        or (cfg.filetypes and not vim.list_contains(cfg.filetypes, ft))
+        or vim.list_contains(cfg.exclude_filetypes, ft)
+        or vim.fn.getfsize(name) > cfg.max_file_bytes
+    then
+        return
     end
+    vim.lsp.buf_attach_client(buf, client_id)
+end
+
+local function restart()
+    if session then
+        session.close()
+        session = nil
+    end
+end
+
+local function set_keys()
+    local keys, map = M.config.keys, vim.keymap.set
+    map("i", "<Plug>(agentfill-trigger)", M.trigger, { desc = "Agent: request infill" })
+    if keys.trigger then
+        map("i", keys.trigger, M.trigger, { desc = "Agent: request infill" })
+    end
+    if keys.accept then
+        map("i", keys.accept, function()
+            if not vim.lsp.inline_completion.get() then
+                return keys.accept
+            end
+        end, { expr = true, desc = "Agent: accept inline completion" })
+    end
+    if keys.next then
+        map("i", keys.next, function()
+            vim.lsp.inline_completion.select({ count = 1 })
+        end, { desc = "Agent: next inline completion" })
+    end
+    if keys.prev then
+        map("i", keys.prev, function()
+            vim.lsp.inline_completion.select({ count = -1 })
+        end, { desc = "Agent: previous inline completion" })
+    end
+end
+
+local function set_commands()
+    local command = api.nvim_create_user_command
+    command("AFRestart", function()
+        restart()
+        vim.notify("agentfill: session restarted")
+    end, { desc = "agentfill: start a new agent session" })
+    command("AFToggle", function()
+        enabled = not enabled
+        if not enabled then
+            ready = nil
+            settle_shown(false)
+            clear_marks()
+        end
+        vim.notify("agentfill: " .. (enabled and "enabled" or "disabled"))
+    end, { desc = "agentfill: enable or disable suggestions" })
+    command("AFAgent", function(args)
+        if args.args == "" then
+            return vim.notify("agentfill: agent " .. M.config.agent)
+        end
+        if not M.config.agents[args.args] then
+            return vim.notify("agentfill: unknown agent " .. args.args, vim.log.levels.ERROR)
+        end
+        M.config.agent = args.args
+        restart()
+        vim.notify("agentfill: agent " .. args.args)
+    end, {
+        nargs = "?",
+        complete = function()
+            local names = vim.tbl_keys(M.config.agents)
+            table.sort(names)
+            return names
+        end,
+        desc = "agentfill: show or switch the agent",
+    })
 end
 
 function M.setup(opts)
     M.config = vim.tbl_deep_extend("force", M.config, opts or {})
-    vim.keymap.set("i", M.config.keys.trigger, M.trigger, { desc = "Agent: request infill" })
+    set_keys()
+    set_commands()
     -- started before other servers so its item sorts first among inline completions
     client_id = vim.lsp.start({ name = "agentfill", cmd = require("agentfill.server") }, { attach = false })
-    api.nvim_create_autocmd("BufEnter", {
-        group = api.nvim_create_augroup("agentfill", { clear = true }),
+    local attach_group = api.nvim_create_augroup("agentfill", { clear = true })
+    api.nvim_create_autocmd({ "BufEnter", "FileType" }, {
+        group = attach_group,
         callback = function(ev)
             attach(ev.buf)
         end,
     })
+    if M.config.enable_inline then
+        api.nvim_create_autocmd("LspAttach", {
+            group = attach_group,
+            callback = function(ev)
+                if ev.data.client_id == client_id then
+                    vim.lsp.inline_completion.enable(true, { bufnr = ev.buf })
+                end
+            end,
+        })
+    end
     for _, buf in ipairs(api.nvim_list_bufs()) do
         if api.nvim_buf_is_loaded(buf) then
             attach(buf)
