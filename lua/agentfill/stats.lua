@@ -1,4 +1,4 @@
--- Per-request metrics: kept for this nvim, appended to a JSONL log, shown by :AFStats
+-- Per-request metrics: kept for this nvim, appended to a JSONL log, shown by :Agentfill stats
 local M = {}
 
 M.entries = {}
