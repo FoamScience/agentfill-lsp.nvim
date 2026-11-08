@@ -1,0 +1,213 @@
+*agentfill.txt*  Coding agents as an inline completion source for Neovim
+
+==============================================================================
+CONTENTS                                                  *agentfill-contents*
+
+  1. Introduction ...................................... |agentfill-intro|
+  2. Requirements ............................... |agentfill-requirements|
+  3. Usage ............................................. |agentfill-usage|
+  4. Commands ....................................... |agentfill-commands|
+  5. Mappings ....................................... |agentfill-mappings|
+  6. Configuration ............................. |agentfill-configuration|
+  7. Agents ........................................... |agentfill-agents|
+  8. Highlights ................................... |agentfill-highlights|
+  9. Lua API .............................................. |agentfill-api|
+ 10. Metrics ......................................... |agentfill-metrics|
+ 11. Safety ........................................... |agentfill-safety|
+
+==============================================================================
+1. INTRODUCTION                                              *agentfill-intro*
+
+agentfill runs an in-process language server that answers
+`textDocument/inlineCompletion` for |vim.lsp.inline_completion|. Suggestions
+come from a long-lived coding agent session (Claude Code or any Agent Client
+Protocol agent).
+
+The model rewrites a small region around the cursor, so a suggestion can also
+change the lines after the cursor. The new text is shown as ghost text, the
+lines it replaces are highlighted with |hl-AgentfillDelete|, and accepting
+applies it as one range.
+
+Each request carries the surrounding lines, the file header, LSP definitions
+of identifiers near the cursor (or outlines of imported files when no LSP
+answers) and m2v.nvim semantic search hits when that plugin is installed.
+
+==============================================================================
+2. REQUIREMENTS                                       *agentfill-requirements*
+
+- Neovim 0.12 or later (|vim.lsp.inline_completion|)
+- the CLI of the agent in use (`claude` or `opencode`) on `$PATH`
+- optional: m2v.nvim, adds semantic search hits to the context
+- optional: fidget.nvim, shows request progress
+
+Run |:checkhealth| agentfill to check them.
+
+==============================================================================
+3. USAGE                                                     *agentfill-usage*
+
+No setup call is needed: the plugin defines |:Agentfill| and
+|<Plug>(agentfill-trigger)| at startup, and starts its client on |VimEnter|
+with the defaults merged with |g:agentfill|. Calling
+`require("agentfill").setup(opts)` before that starts it with `opts`; calling
+it later changes the options in place.
+
+Press <M-c> in insert mode to request a suggestion. Accept it with
+`vim.lsp.inline_completion.get()`, or set `keys.accept` (|agentfill-keys|).
+
+The client attaches to named, normal buffers that pass `filetypes` and
+`exclude_filetypes` and are no larger than `max_file_bytes`. The trigger does
+nothing in other buffers.
+
+==============================================================================
+4. COMMANDS                                               *agentfill-commands*
+
+                                                                  *:Agentfill*
+:Agentfill agent [{name}]
+    Show the agent, or switch to {name} (a key of `agents`) and start a new
+    session.
+
+:Agentfill restart
+    Start a new agent session.
+
+:Agentfill toggle
+    Turn suggestions off or on.
+
+:Agentfill stats
+    Open the request metrics float (|agentfill-metrics|).
+
+==============================================================================
+5. MAPPINGS                                               *agentfill-mappings*
+
+                                                   *<Plug>(agentfill-trigger)*
+<Plug>(agentfill-trigger)
+    Insert mode: request a suggestion. Always defined. >lua
+
+    vim.keymap.set("i", "<C-l>", "<Plug>(agentfill-trigger)")
+<
+                                                              *agentfill-keys*
+`keys` in the configuration maps insert-mode keys; `false` skips a mapping.
+
+  trigger   `<M-c>`   request a suggestion
+  accept    `false`   `vim.lsp.inline_completion.get()`; types the key itself
+                      when no suggestion is shown
+  next      `false`   `vim.lsp.inline_completion.select({ count = 1 })`
+  prev      `false`   `vim.lsp.inline_completion.select({ count = -1 })`
+
+==============================================================================
+6. CONFIGURATION                                     *agentfill-configuration*
+
+                                                                 *g:agentfill*
+Options go to `setup(opts)` or, before the plugin loads, to `g:agentfill`.
+Both are merged over the defaults; values of the wrong type raise an error
+naming the option and leave the active config unchanged.
+
+The defaults, with LuaCATS types, are in `lua/agentfill/config.lua` and
+readable at runtime: >lua
+
+    require("agentfill.config").defaults  -- defaults
+    require("agentfill").config           -- active config
+<
+Options ~
+
+  agent              `"claude"`   key of `agents` to use
+  agents             table       |agentfill-agents|
+  max_turns          `8`          completions per session before it restarts
+  lines_before       `80`         excerpt rows above the region
+  lines_after        `30`         excerpt rows below the region
+  region             `{ before = 2, after = 8 }`
+                                 rows around the cursor the model may rewrite
+  header_lines       `20`         file header rows sent with each request
+  max_file_bytes     `524288`     larger files are not attached to
+  defs               table|false LSP definitions of identifiers in the region:
+                                 `timeout_ms`, `max_idents`, `max`, `max_lines`
+  imports            table|false outlines of imported files, used when no
+                                 definition was found: `max`, `max_lines`
+  search             table|false m2v.nvim hits: `n`, `max`, `max_lines`,
+                                 `max_query`, `timeout_ms`
+  keys               table       |agentfill-keys|
+  enable_inline      `true`       enable |vim.lsp.inline_completion| in
+                                 buffers the client attaches to
+  filetypes          `nil`        attach only to these; nil attaches to all
+  exclude_filetypes  `{}`         never attach to these
+  debug              `false`      log the reply, the item and what Neovim drew
+                                 with each request
+  hl_delete          `"AgentfillDelete"`
+                                 group for the lines a suggestion replaces;
+                                 `false` disables
+
+==============================================================================
+7. AGENTS                                                   *agentfill-agents*
+
+Each entry of `agents` has a `backend`:
+
+`"claude"`  native `claude -p` stream-json; uses the Claude Code subscription.
+          Runs with no tools, no settings, no MCP and its own system prompt.
+          Fields: `cmd` (`"claude"`), `model` (`"haiku"`), `effort` (`"low"`).
+
+`"acp"`     any Agent Client Protocol agent. Fields:
+          `cmd`         command list
+          `env`         extra environment for the agent process
+          `mode`        session `mode` config option; must select a tool-less
+                      agent, the session refuses to start when it cannot be set
+          `model`       session `model` config option (warns when it cannot be
+                      applied)
+          `tool_guard`  `true`: cancel any turn in which the agent starts a
+                      tool call
+
+The `opencode` preset injects a deny-all `agentfill` agent through
+`OPENCODE_CONFIG_CONTENT` and selects it as the session mode. >lua
+
+    require("agentfill").setup({
+        agent = "opencode",
+        agents = {
+            opencode = { model = "nvidia/openai/gpt-oss-20b" },
+            myagent = { backend = "acp", cmd = { "my-agent", "--acp" }, mode = "..." },
+        },
+    })
+<
+==============================================================================
+8. HIGHLIGHTS                                           *agentfill-highlights*
+
+                                                         *hl-AgentfillDelete*
+AgentfillDelete     Lines a suggestion replaces. Links to |hl-DiffDelete|.
+
+==============================================================================
+9. LUA API                                                     *agentfill-api*
+
+require("agentfill").setup({opts})                         *agentfill.setup()*
+    Merge {opts} over the active config and start the client. Safe to call
+    again.
+
+require("agentfill").trigger()                           *agentfill.trigger()*
+    Request a suggestion at the cursor (insert mode).
+
+require("agentfill").agent({name})                         *agentfill.agent()*
+require("agentfill").restart()                           *agentfill.restart()*
+require("agentfill").toggle()                             *agentfill.toggle()*
+require("agentfill").stats()                               *agentfill.stats()*
+    Same as the |:Agentfill| subcommands.
+
+==============================================================================
+10. METRICS                                                *agentfill-metrics*
+
+`:Agentfill stats` shows this Neovim instance's numbers next to all-time
+totals, plus the last 10 requests: outcomes (shown, accepted, no suggestion,
+discarded, superseded, error), latency p50/p90, tokens and cost per turn,
+prompt size by part, and the current session's turns and context use.
+
+Every request is appended as one JSON line to
+`stdpath("state")/agentfill/requests.jsonl`.
+
+==============================================================================
+11. SAFETY                                                  *agentfill-safety*
+
+Completions never need tools. The client advertises no filesystem or terminal
+capabilities, answers every permission request with `cancelled`, and cancels
+a turn as soon as a tool call starts (with `tool_guard`).
+
+A guard cannot undo a tool that ran before the cancel arrived. An ACP agent
+without a tool-less `mode` can still act in its working directory
+(`stdpath("cache")/agentfill`) or on absolute paths, so give every ACP agent a
+deny-all mode, as the opencode preset does.
+
+ vim:tw=78:ts=8:ft=help:norl:
