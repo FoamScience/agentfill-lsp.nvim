@@ -27,7 +27,7 @@ An in-process language server answers `textDocument/inlineCompletion` for Neovim
 - **Runtime control:** switch agents, restart the session or pause suggestions without
   restarting Neovim (see [Commands](#commands)).
 - **Filtering:** attach by filetype allow and deny lists, skipping files over `max_file_bytes`.
-- **Metrics:** `:AFStats` reports outcomes, latency, tokens and cost.
+- **Metrics:** `:Agentfill stats` reports outcomes, latency, tokens and cost.
 - **No tools:** see [Safety](#safety).
 
 ## Agents
@@ -63,9 +63,18 @@ Any other [Agent Client Protocol](https://agentclientprotocol.com) agent can be 
 }
 ```
 
+No `setup()` call is needed: without one the client starts on `VimEnter` with the defaults
+merged with `vim.g.agentfill`. `setup(opts)` can be called again at any time to change options.
+
 Run `:checkhealth agentfill` to check the setup.
 
 ## Configuration
+
+Every option and its default lives in
+[`lua/agentfill/config.lua`](lua/agentfill/config.lua), also readable at runtime as
+`require("agentfill.config").defaults` (the active config is `require("agentfill").config`).
+Options go to `setup(opts)` or, before the plugin loads, to `vim.g.agentfill`. Values of the
+wrong type raise an error naming the option. For example:
 
 ```lua
 opts = {
@@ -80,7 +89,7 @@ opts = {
     enable_inline = true, -- enable vim.lsp.inline_completion where the client attaches
     filetypes = nil, -- attach only to these filetypes; nil attaches to all
     exclude_filetypes = { "gitcommit" },
-    hl_delete = "DiffDelete", -- lines a suggestion replaces, shown next to the ghost text; false disables
+    hl_delete = "AgentfillDelete", -- lines a suggestion replaces, shown next to the ghost text; false disables
 }
 ```
 
@@ -105,10 +114,19 @@ All keys are insert-mode mappings. Set a key to `false` to skip its mapping.
 
 | Command | Action |
 |---|---|
-| `:AFAgent [name]` | Show the agent, or switch to `name` and start a new session |
-| `:AFRestart` | Start a new agent session |
-| `:AFToggle` | Turn suggestions off or on |
-| `:AFStats` | Show request metrics (see [Metrics](#metrics)) |
+| `:Agentfill agent [name]` | Show the agent, or switch to `name` and start a new session |
+| `:Agentfill restart` | Start a new agent session |
+| `:Agentfill toggle` | Turn suggestions off or on |
+| `:Agentfill stats` | Show request metrics (see [Metrics](#metrics)) |
+
+The same actions are Lua functions: `require("agentfill").agent(name)`, `.restart()`,
+`.toggle()`, `.stats()` and `.trigger()`.
+
+### Highlights
+
+| Group | Default | Used for |
+|---|---|---|
+| `AgentfillDelete` | links to `DiffDelete` | lines a suggestion replaces |
 
 ### ACP agent fields
 
@@ -122,7 +140,7 @@ All keys are insert-mode mappings. Set a key to `false` to skip its mapping.
 
 ## Metrics
 
-`:AFStats` opens a float with this Neovim instance's numbers next to all-time totals, plus the
+`:Agentfill stats` opens a float with this Neovim instance's numbers next to all-time totals, plus the
 last 10 requests:
 
 | Metric | Details |
@@ -155,3 +173,12 @@ Completions never need tools. The client:
 > A guard cannot undo a tool that ran before the cancel arrived. An ACP agent without a tool-less
 > `mode` can still act in its working directory (`stdpath("cache")/agentfill`) or on absolute
 > paths, so give every ACP agent a deny-all mode, as the opencode preset does.
+
+## Development
+
+```sh
+nvim --clean --headless -l tests/item_spec.lua
+stylua --check lua plugin tests
+```
+
+See `:h agentfill` for the full reference.
