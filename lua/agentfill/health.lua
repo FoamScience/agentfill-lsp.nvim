@@ -13,7 +13,10 @@ function M.check()
     if #vim.lsp.get_clients({ name = "agentfill" }) > 0 then
         health.ok("agentfill client is running")
     else
-        health.warn("agentfill client is not running", "call require('agentfill').setup()")
+        health.warn(
+            "agentfill client is not running",
+            "it starts on VimEnter or with require('agentfill').setup(); see :messages"
+        )
     end
 
     health.start("agentfill: agent")
